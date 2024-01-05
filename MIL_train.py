@@ -123,6 +123,7 @@ def train(run, loader, model, criterion, optimizer):
     model.train()
     running_loss = 0.
     for i, (input, target) in enumerate(loader):
+        print(input.shape)
         input = input.cuda()
         target = target.cuda()
         # print(input.shape)

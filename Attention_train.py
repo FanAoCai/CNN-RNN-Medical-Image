@@ -13,12 +13,13 @@ import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import torchvision.models as models
+from torch.nn import init
 
-parser = argparse.ArgumentParser(description='MIL-nature-medicine-2019 RNN aggregator training script')
+parser = argparse.ArgumentParser(description='MIL-nature-medicine-2019 attention aggregator training script')
 parser.add_argument('--train_lib', type=str, default='7cls_data/train_data_7cls', help='path to train MIL library binary')
 parser.add_argument('--val_lib', type=str, default='7cls_data/val_data_7cls', help='path to validation MIL library binary. If present.')
 parser.add_argument('--output', type=str, default='.', help='name of output file')
-parser.add_argument('--batch_size', type=int, default=16, help='mini-batch size (default: 128)')
+parser.add_argument('--batch_size', type=int, default=8, help='mini-batch size (default: 128)')
 parser.add_argument('--nepochs', type=int, default=100, help='number of epochs')
 parser.add_argument('--workers', default=0, type=int, help='number of data loading workers (default: 4)')
 parser.add_argument('--s', default=10, type=int, help='how many top k tiles to consider (default: 10)')
@@ -38,12 +39,12 @@ def main():
         transforms.ToTensor(),
         normalize
     ])
-    train_dset = rnndata(args.train_lib, args.s, args.shuffle, trans)
+    train_dset = attentiondata(args.train_lib, args.s, args.shuffle, trans)
     train_loader = torch.utils.data.DataLoader(
         train_dset,
         batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=False)
-    val_dset = rnndata(args.val_lib, args.s, False, trans)
+    val_dset = attentiondata(args.val_lib, args.s, False, trans)
     val_loader = torch.utils.data.DataLoader(
         val_dset,
         batch_size=args.batch_size, shuffle=False,
@@ -56,8 +57,8 @@ def main():
     embedder = embedder.cuda()
     embedder.eval()
 
-    rnn = rnn_single(args.ndims)
-    rnn = rnn.cuda()
+    attention = attention_single(7,32,32,True)
+    attention = attention.cuda()
     
     #optimization
     if args.weights==0.5:
@@ -65,7 +66,7 @@ def main():
     else:
         w = torch.Tensor([1-args.weights,args.weights])
         criterion = nn.CrossEntropyLoss(w).cuda()
-    optimizer = optim.SGD(rnn.parameters(), 0.1, momentum=0.9, dampening=0, weight_decay=1e-4, nesterov=True)
+    optimizer = optim.SGD(attention.parameters(), 0.1, momentum=0.9, dampening=0, weight_decay=1e-4, nesterov=True)
     cudnn.benchmark = True
 
     fconv = open(os.path.join(args.output, 'convergence.csv'), 'w')
@@ -74,8 +75,8 @@ def main():
 
     #
     for epoch in range(args.nepochs):
-        train_loss, train_fpr, train_fnr = train_single(epoch, embedder, rnn, train_loader, criterion, optimizer)
-        val_loss, val_fpr, val_fnr = test_single(epoch, embedder, rnn, val_loader, criterion)
+        train_loss, train_fpr, train_fnr = train_single(epoch, embedder, attention, train_loader, criterion, optimizer)
+        val_loss, val_fpr, val_fnr = test_single(epoch, embedder, attention, val_loader, criterion)
 
         fconv = open(os.path.join(args.output,'convergence.csv'), 'a')
         fconv.write('{},{},{},{},{},{},{}\n'.format(epoch+1, train_loss, train_fpr, train_fnr, val_loss, val_fpr, val_fnr))
@@ -86,12 +87,12 @@ def main():
             best_acc = 1-val_err
             obj = {
                 'epoch': epoch+1,
-                'state_dict': rnn.state_dict()
+                'state_dict': attention.state_dict()
             }
-            torch.save(obj, os.path.join(args.output,'rnn_checkpoint_best.pth'))
+            torch.save(obj, os.path.join(args.output,'attention_checkpoint_best.pth'))
 
-def train_single(epoch, embedder, rnn, loader, criterion, optimizer):
-    rnn.train()
+def train_single(epoch, embedder, attention, loader, criterion, optimizer):
+    attention.train()
     running_loss = 0.
     running_fps = 0.
     running_fns = 0.
@@ -99,18 +100,15 @@ def train_single(epoch, embedder, rnn, loader, criterion, optimizer):
     for i,(inputs,target) in enumerate(loader):
         print('Training - Epoch: [{}/{}]\tBatch: [{}/{}]'.format(epoch+1, args.nepochs, i+1, len(loader)))
 
-        batch_size = inputs[0].size(0)
-        rnn.zero_grad()
-
-        state = rnn.init_hidden(batch_size).cuda()
+        attention.zero_grad()
+        middle = torch.zeros(len(inputs), embedder(inputs[0].cuda())[1].shape[0], embedder(inputs[0].cuda())[1].shape[1])
+        middle = middle.cuda()
         for s in range(len(inputs)):
             input = inputs[s].cuda()
             # print('input1: ', input.shape)
             _, input = embedder(input)
-            # print('input2: ', input.shape)
-            # print('state: ', state.shape)
-            output, state = rnn(input, state)
-            # print('output: ', output.shape)
+            middle[s] = input
+        output = attention(middle)
 
         target = target.cuda()
         loss = criterion(output, target)
@@ -128,8 +126,8 @@ def train_single(epoch, embedder, rnn, loader, criterion, optimizer):
     print('Training - Epoch: [{}/{}]\tLoss: {}\tFPR: {}\tFNR: {}'.format(epoch+1, args.nepochs, running_loss, running_fps, running_fns))
     return running_loss, running_fps, running_fns
 
-def test_single(epoch, embedder, rnn, loader, criterion):
-    rnn.eval()
+def test_single(epoch, embedder, attention, loader, criterion):
+    attention.eval()
     running_loss = 0.
     running_fps = 0.
     running_fns = 0.
@@ -140,11 +138,11 @@ def test_single(epoch, embedder, rnn, loader, criterion):
             
             batch_size = inputs[0].size(0)
             
-            state = rnn.init_hidden(batch_size).cuda()
+            state = attention.init_hidden(batch_size).cuda()
             for s in range(len(inputs)):
                 input = inputs[s].cuda()
                 _, input = embedder(input)
-                output, state = rnn(input, state)
+                output, state = attention(input, state)
             
             target = target.cuda()
             loss = criterion(output,target)
@@ -186,30 +184,60 @@ class ResNetEncoder(nn.Module):
         x = x.view(x.size(0),-1)
         return self.fc(x), x
 
-class rnn_single(nn.Module):
+class attention_single(nn.Module):
 
-    def __init__(self, ndims):
-        super(rnn_single, self).__init__()
-        self.ndims = ndims
+    def __init__(self, in_channels,c_m,c_n,reconstruct = True):
+        super().__init__()
+        self.in_channels=in_channels
+        self.c_m=c_m
+        self.c_n=c_n
+        self.reconstruct = reconstruct
+        self.convA=nn.Conv1d(in_channels,c_m,1)
+        self.convB=nn.Conv1d(in_channels,c_n,1)
+        self.convV=nn.Conv1d(in_channels,c_n,1)
+        if self.reconstruct:
+            self.conv_reconstruct = nn.Conv1d(c_m, in_channels, kernel_size = 1)
+        # self.init_weights()
 
-        self.fc1 = nn.Linear(512, ndims)
-        self.fc2 = nn.Linear(ndims, ndims)
 
-        self.fc3 = nn.Linear(ndims, 2)
+    # def init_weights(self):
+    #     for m in self.modules():
+    #         if isinstance(m, nn.Conv2d):
+    #             init.kaiming_normal_(m.weight, mode='fan_out')
+    #             if m.bias is not None:
+    #                 init.constant_(m.bias, 0)
+    #         elif isinstance(m, nn.BatchNorm2d):
+    #             init.constant_(m.weight, 1)
+    #             init.constant_(m.bias, 0)
+    #         elif isinstance(m, nn.Linear):
+    #             init.normal_(m.weight, std=0.001)
+    #             if m.bias is not None:
+    #                 init.constant_(m.bias, 0)
 
-        self.activation = nn.ReLU()
+    def forward(self, x):
+        b, c, h=x.shape
+        assert c==self.in_channels
+        A=self.convA(x) #b,c_m,h,w
+        print('A.shape', A.shape)
+        B=self.convB(x) #b,c_n,h,w
+        print('B.shape', B.shape)
+        V=self.convV(x) #b,c_n,h,w
+        print('V.shape', V.shape)
+        tmpA=A.view(b,self.c_m,-1)
+        attention_maps=F.softmax(B.view(b,self.c_n,-1))
+        print('attention_maps', attention_maps)
+        attention_vectors=F.softmax(V.view(b,self.c_n,-1))
+        # step 1: feature gating
+        global_descriptors=torch.bmm(tmpA,attention_maps.permute(0,2,1)) #b.c_m,c_n
+        # step 2: feature distribution
+        tmpZ = global_descriptors.matmul(attention_vectors) #b,c_m,h*w
+        tmpZ=tmpZ.view(b,self.c_m,h) #b,c_m,h,w
+        if self.reconstruct:
+            tmpZ=self.conv_reconstruct(tmpZ)
 
-    def forward(self, input, state):
-        input = self.fc1(input)
-        state = self.fc2(state)
-        state = self.activation(state+input)
-        output = self.fc3(state)
-        return output, state
+        return tmpZ
 
-    def init_hidden(self, batch_size):
-        return torch.zeros(batch_size, self.ndims)
-
-class rnndata(data.Dataset):
+class attentiondata(data.Dataset):
 
     def __init__(self, path, s, shuffle=False, transform=None):
 
@@ -239,15 +267,15 @@ class rnndata(data.Dataset):
         if self.shuffle:
             grid = random.sample(grid,len(grid))
 
-        out = []
         s = min(self.s, len(grid))
+        out = torch.zeros(s, 3, self.size, self.size)
         for i in range(s):
             img = slide.read_region(grid[i], self.level, (self.size, self.size)).convert('RGB')
             if self.mult != 1:
                 img = img.resize((224,224), Image.BILINEAR)
             if self.transform is not None:
                 img = self.transform(img)
-            out.append(img)
+            out[i] = img
         
         return out, self.targets[index]
 

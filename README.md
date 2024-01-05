@@ -19,9 +19,9 @@ result = np.array(image.read_region((0, 0), 3, (224, 224)))   #(0,0）代表起�
 <img src="source_image/CNN_arch.png" width="450"/>
 </div>
 
-接着使用训练好的ResNet模型，扫描WSI图像的每个层级图像，得到S个病变概率最大的区域送入RNN模型进行训练，更新参数，下面是RNN架构图：
+接着使用训练好的ResNet模型，扫描WSI图像的每个层级图像，得到S个病变概率最大的区域送入RNN或者Attention模型进行训练，更新参数，下面是RNN架构图：
 <div align="center">
-<img src="source_image/RNN_arch.png" width="450"/>
+<img src="source_image/RNN_attention_arch.png" width="450"/>
 </div>
 
 ## 病理切片可视化
@@ -139,3 +139,20 @@ RNN模型:
 <div align="center">
 <img src="source_image/prediction_RNN_L3.png" width="350"/>
 </div>
+
+## 结果分析
+1、数据量少，导致模型严重过拟合，在验证集和测试集上表现较差，同时，数据量少导致的模型batch_size小，影响着模型的准确率，通过训练发现，batch_size在64以下时，模型loss会随着batch_size增大而减小，准确率会提升；
+2、模型对正常切片的预测效率差，原因是正常切片的数量少于癌症切片，模型在学习时没有充分学到正常切片的特征，导致对正常切片预测准确率低；
+3、通过比较发现，当WSI图像的层级越高时，模型预测的准确率越高，但是受限于数据本身，该结论的可靠性还需要验证。
+
+
+
+## 备注
+在 __init__() 函数中，加载的每一条数据都是一个列表 List【长度为 len_list】，列表中的每一项是一段经过处理的视频，维度为 [C, T, H, W]。
+
+所以 dataset 中每一条数据的维度应该是 [len_list, C, T, H, W]。
+
+按照以往加载数据的经验，我自然而然地认为用 dataloader 返回的数据维度应该是 [B, len_list, C, T, H, W]。然而，事情不是这样的！实际上用 dataloader 返回的数据维度是 [len_list, B, C, T, H, W]。
+
+dataload做法：如果 dataset 返回的 sample 是序列（Sequence）类【如：字符串(普通字符串和unicode字符串)，列表和元组】的，那 dataloader 默认把 B（batch size）那个维度加在序列里每个 item 的 shape 前面
+

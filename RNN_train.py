@@ -13,12 +13,13 @@ import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import torchvision.models as models
+import matplotlib.pyplot as plt
 
 parser = argparse.ArgumentParser(description='MIL-nature-medicine-2019 RNN aggregator training script')
 parser.add_argument('--train_lib', type=str, default='7cls_data/train_data_7cls', help='path to train MIL library binary')
 parser.add_argument('--val_lib', type=str, default='7cls_data/val_data_7cls', help='path to validation MIL library binary. If present.')
 parser.add_argument('--output', type=str, default='.', help='name of output file')
-parser.add_argument('--batch_size', type=int, default=16, help='mini-batch size (default: 128)')
+parser.add_argument('--batch_size', type=int, default=8, help='mini-batch size (default: 128)')
 parser.add_argument('--nepochs', type=int, default=100, help='number of epochs')
 parser.add_argument('--workers', default=0, type=int, help='number of data loading workers (default: 4)')
 parser.add_argument('--s', default=10, type=int, help='how many top k tiles to consider (default: 10)')
@@ -44,6 +45,8 @@ def main():
         batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=False)
     val_dset = rnndata(args.val_lib, args.s, False, trans)
+    # for i, data in enumerate(train_dset):
+    #     print(data)
     val_loader = torch.utils.data.DataLoader(
         val_dset,
         batch_size=args.batch_size, shuffle=False,
@@ -97,21 +100,22 @@ def train_single(epoch, embedder, rnn, loader, criterion, optimizer):
     running_fns = 0.
 
     for i,(inputs,target) in enumerate(loader):
+        print(i)
         print('Training - Epoch: [{}/{}]\tBatch: [{}/{}]'.format(epoch+1, args.nepochs, i+1, len(loader)))
-
+        
         batch_size = inputs[0].size(0)
         rnn.zero_grad()
 
         state = rnn.init_hidden(batch_size).cuda()
         for s in range(len(inputs)):
             input = inputs[s].cuda()
+            # print(input.shape)
             # print('input1: ', input.shape)
             _, input = embedder(input)
-            # print('input2: ', input.shape)
+            # print('input2: ', input)
             # print('state: ', state.shape)
-            output, state = rnn(input, state)
+            output, state = rnn(input, state)  #与上一个数据有关
             # print('output: ', output.shape)
-
         target = target.cuda()
         loss = criterion(output, target)
         loss.backward()
@@ -234,8 +238,11 @@ class rnndata(data.Dataset):
 
     def __getitem__(self,index):
 
+        # print(index)
         slide = self.slides[index]
+        # print(slide)
         grid = self.grid[index]
+        # print(grid)
         if self.shuffle:
             grid = random.sample(grid,len(grid))
 
@@ -243,12 +250,16 @@ class rnndata(data.Dataset):
         s = min(self.s, len(grid))
         for i in range(s):
             img = slide.read_region(grid[i], self.level, (self.size, self.size)).convert('RGB')
+            # plt.figure(1)
+            # plt.imshow(img)   #result为read_region方法返回的图像数组
+            # plt.show()
             if self.mult != 1:
                 img = img.resize((224,224), Image.BILINEAR)
             if self.transform is not None:
                 img = self.transform(img)
+            # print(img.shape)
             out.append(img)
-        
+        # print(self.targets[index])
         return out, self.targets[index]
 
     def __len__(self):
