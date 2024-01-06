@@ -115,7 +115,7 @@ def train_single(epoch, embedder, rnn, loader, criterion, optimizer):
             # print('input2: ', input)
             # print('state: ', state.shape)
             output, state = rnn(input, state)  #与上一个数据有关
-            # print('output: ', output.shape)
+            print('output: ', output.shape)
         target = target.cuda()
         loss = criterion(output, target)
         loss.backward()
