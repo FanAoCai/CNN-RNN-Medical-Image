@@ -146,13 +146,17 @@ RNN模型:
 3、通过比较发现，当WSI图像的层级越高时，模型预测的准确率越高，但是受限于数据本身，该结论的可靠性还需要验证。
 
 
+## 补充
+Attention模型：在训练集上表现良好，但在测试集上表现很差，表现出过拟合，并且受学习率影响很大原因为数据量太少。
 
-## 备注
-在 __init__() 函数中，加载的每一条数据都是一个列表 List【长度为 len_list】，列表中的每一项是一段经过处理的视频，维度为 [C, T, H, W]。
+* train曲线
+<div align="center">
+<img src="source_image/WSI_Attention_L7_loss.png" width="350"/>
+</div>
 
-所以 dataset 中每一条数据的维度应该是 [len_list, C, T, H, W]。
+* val曲线
+<div align="center">
+<img src="source_image/WSI_Attention_L7_val_loss.png" width="350"/>
+</div>
 
-按照以往加载数据的经验，我自然而然地认为用 dataloader 返回的数据维度应该是 [B, len_list, C, T, H, W]。然而，事情不是这样的！实际上用 dataloader 返回的数据维度是 [len_list, B, C, T, H, W]。
-
-dataload做法：如果 dataset 返回的 sample 是序列（Sequence）类【如：字符串(普通字符串和unicode字符串)，列表和元组】的，那 dataloader 默认把 B（batch size）那个维度加在序列里每个 item 的 shape 前面
 

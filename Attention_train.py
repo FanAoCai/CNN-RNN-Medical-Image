@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser(description='MIL-nature-medicine-2019 attention
 parser.add_argument('--train_lib', type=str, default='7cls_data/train_data_7cls', help='path to train MIL library binary')
 parser.add_argument('--val_lib', type=str, default='7cls_data/val_data_7cls', help='path to validation MIL library binary. If present.')
 parser.add_argument('--output', type=str, default='.', help='name of output file')
-parser.add_argument('--batch_size', type=int, default=8, help='mini-batch size (default: 128)')
+parser.add_argument('--batch_size', type=int, default=32, help='mini-batch size (default: 128)')
 parser.add_argument('--nepochs', type=int, default=100, help='number of epochs')
 parser.add_argument('--workers', default=0, type=int, help='number of data loading workers (default: 4)')
 parser.add_argument('--s', default=10, type=int, help='how many top k tiles to consider (default: 10)')
@@ -57,7 +57,7 @@ def main():
     embedder = embedder.cuda()
     embedder.eval()
 
-    attention = attention_single(7,32,32,True)
+    attention = attention_single(512,4)
     attention = attention.cuda()
     
     #optimization
@@ -66,7 +66,7 @@ def main():
     else:
         w = torch.Tensor([1-args.weights,args.weights])
         criterion = nn.CrossEntropyLoss(w).cuda()
-    optimizer = optim.SGD(attention.parameters(), 0.1, momentum=0.9, dampening=0, weight_decay=1e-4, nesterov=True)
+    optimizer = optim.SGD(attention.parameters(), 0.001, momentum=0.9, dampening=0, weight_decay=1e-4, nesterov=True)
     cudnn.benchmark = True
 
     fconv = open(os.path.join(args.output, 'convergence.csv'), 'w')
@@ -136,13 +136,15 @@ def test_single(epoch, embedder, attention, loader, criterion):
         for i,(inputs,target) in enumerate(loader):
             print('Validating - Epoch: [{}/{}]\tBatch: [{}/{}]'.format(epoch+1,args.nepochs,i+1,len(loader)))
             
-            batch_size = inputs[0].size(0)
-            
-            state = attention.init_hidden(batch_size).cuda()
+            attention.zero_grad()
+            middle = torch.zeros(len(inputs), embedder(inputs[0].cuda())[1].shape[0], embedder(inputs[0].cuda())[1].shape[1])
+            middle = middle.cuda()
             for s in range(len(inputs)):
                 input = inputs[s].cuda()
+                # print('input1: ', input.shape)
                 _, input = embedder(input)
-                output, state = attention(input, state)
+                middle[s] = input
+            output = attention(middle)
             
             target = target.cuda()
             loss = criterion(output,target)
@@ -183,48 +185,79 @@ class ResNetEncoder(nn.Module):
         x = self.features(x)
         x = x.view(x.size(0),-1)
         return self.fc(x), x
-
+    
 class attention_single(nn.Module):
-
-    def __init__(self, in_channels,c_m,c_n,reconstruct = True):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
-        self.in_channels=in_channels
-        self.c_m=c_m
-        self.c_n=c_n
-        self.reconstruct = reconstruct
-        self.convA=nn.Conv1d(in_channels,c_m,1)
-        self.convB=nn.Conv1d(in_channels,c_n,1)
-        self.convV=nn.Conv1d(in_channels,c_n,1)
-        if self.reconstruct:
-            self.conv_reconstruct = nn.Conv1d(c_m, in_channels, kernel_size = 1)
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
+        self.scale = qk_scale or head_dim ** -0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.deal = nn.Linear(7*512, 2)
 
     def forward(self, x):
-        b, c, h=x.shape
-        assert c==self.in_channels
-        A=self.convA(x) #b,c_m,h,w
-        print('A.shape', A.shape)
-        B=self.convB(x) #b,c_n,h,w
-        print('B.shape', B.shape)
-        V=self.convV(x) #b,c_n,h,w
-        print('V.shape', V.shape)
-        tmpA=A.view(b,self.c_m,-1)
-        attention_maps=F.softmax(B.view(b,self.c_n,-1))
-        print('attention_maps', attention_maps.shape)
-        attention_vectors=F.softmax(V.view(b,self.c_n,-1))
-        print('attention_vectors', attention_vectors.shape)
-        # step 1: feature gating
-        global_descriptors=torch.bmm(tmpA,attention_maps.permute(0,2,1)) #b.c_m,c_n
-        print('global_descriptors', global_descriptors.shape)
-        # step 2: feature distribution
-        tmpZ = global_descriptors.matmul(attention_vectors) #b,c_m,h*w
-        print('tmpZ', tmpZ.shape)
-        tmpZ=tmpZ.view(b,self.c_m,h) #b,c_m,h,w
-        print('final', tmpZ.shape)
-        if self.reconstruct:
-            tmpZ=self.conv_reconstruct(tmpZ)
-        print('con', tmpZ.shape)
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
-        return tmpZ
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        x = x.flatten(1)
+        x = self.deal(x)
+        print(x.shape)
+        return x
+
+# class attention_single(nn.Module):
+
+#     def __init__(self, in_channels,c_m,c_n,reconstruct = True):
+#         super().__init__()
+#         self.in_channels=in_channels
+#         self.c_m=c_m
+#         self.c_n=c_n
+#         self.reconstruct = reconstruct
+#         self.convA=nn.Conv1d(in_channels,c_m,1)
+#         self.convB=nn.Conv1d(in_channels,c_n,1)
+#         self.convV=nn.Conv1d(in_channels,c_n,1)
+#         if self.reconstruct:
+#             self.conv_reconstruct = nn.Conv1d(c_m, in_channels, kernel_size = 1)
+
+#     def forward(self, x):
+#         b, c, h=x.shape
+#         assert c==self.in_channels
+#         A=self.convA(x) #b,c_m,h,w
+#         print('A.shape', A.shape)
+#         B=self.convB(x) #b,c_n,h,w
+#         print('B.shape', B.shape)
+#         V=self.convV(x) #b,c_n,h,w
+#         print('V.shape', V.shape)
+#         tmpA=A.view(b,self.c_m,-1)
+#         attention_maps=F.softmax(B.view(b,self.c_n,-1))
+#         print('attention_maps', attention_maps.shape)
+#         attention_vectors=F.softmax(V.view(b,self.c_n,-1))
+#         print('attention_vectors', attention_vectors.shape)
+#         # step 1: feature gating
+#         global_descriptors=torch.bmm(tmpA,attention_maps.permute(0,2,1)) #b.c_m,c_n
+#         print('global_descriptors', global_descriptors.shape)
+#         # step 2: feature distribution
+#         tmpZ = global_descriptors.matmul(attention_vectors) #b,c_m,h*w
+#         print('tmpZ', tmpZ.shape)
+#         tmpZ=tmpZ.view(b,self.c_m,h) #b,c_m,h,w
+#         print('final', tmpZ.shape)
+#         if self.reconstruct:
+#             tmpZ=self.conv_reconstruct(tmpZ)
+#         print('con', tmpZ.shape)
+
+#         return tmpZ
 
 class attentiondata(data.Dataset):
 
